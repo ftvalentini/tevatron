@@ -84,7 +84,7 @@ def main():
         model_args,
         training_args,
         cache_dir=model_args.cache_dir,
-        torch_dtype=torch_dtype,
+        dtype=torch_dtype,
         attn_implementation=model_args.attn_implementation,
     )
 

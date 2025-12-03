@@ -38,8 +38,11 @@ class TevatronTrainer(Trainer):
                 output_dir, state_dict=state_dict, safe_serialization=self.args.save_safetensors
             )
 
-        if self.tokenizer is not None:
-            self.tokenizer.save_pretrained(output_dir)
+        # Use processing_class for compatibility with newer transformers versions
+        # tokenizer = getattr(self, 'processing_class', None) or getattr(self, 'tokenizer', None)
+        tokenizer = self.processing_class
+        if tokenizer is not None:
+            tokenizer.save_pretrained(output_dir)
 
         # Good practice: save your training arguments together with the trained model
         torch.save(self.args, os.path.join(output_dir, TRAINING_ARGS_NAME))
