@@ -284,7 +284,8 @@ class EncodeDataset(Dataset):
     def __getitem__(self, item):
         content = self.encode_data[item]
         if self.data_args.encode_is_query:
-            content_id = content['query_id']
+            # content_id = content['query_id']
+            content_id = content.get('query_id', content.get('qid', ''))
             content_text = content.get('query_text', content.get('query', ''))
             content_text = self.data_args.query_prefix + content_text
             content_image = content.get('query_image', None)
