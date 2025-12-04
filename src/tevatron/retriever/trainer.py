@@ -4,6 +4,7 @@ from typing import Optional
 import torch
 
 from transformers.trainer import Trainer, TRAINING_ARGS_NAME
+from transformers.trainer_callback import TrainerCallback
 import torch.distributed as dist
 from .modeling import EncoderModel
 
@@ -11,11 +12,41 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+class EpochCheckpointCallback(TrainerCallback):
+    """
+    Callback to save checkpoints every N epochs.
+    """
+    def __init__(self, save_epochs: int):
+        self.save_epochs = save_epochs
+        self.last_saved_epoch = -1
+
+    def on_epoch_end(self, args, state, control, **kwargs):
+        """
+        Event called at the end of an epoch.
+        """
+        current_epoch = int(state.epoch)
+        
+        # Check if we should save based on save_epochs interval
+        if self.save_epochs > 0 and current_epoch > 0:
+            if current_epoch % self.save_epochs == 0 and current_epoch != self.last_saved_epoch:
+                control.should_save = True
+                self.last_saved_epoch = current_epoch
+                logger.info(f"Triggering checkpoint save at epoch {current_epoch}")
+        
+        return control
+
+
 class TevatronTrainer(Trainer):
     def __init__(self, *args, **kwargs):
         super(TevatronTrainer, self).__init__(*args, **kwargs)
         self.is_ddp = dist.is_initialized()
         self._dist_loss_scale_factor = dist.get_world_size() if self.is_ddp else 1
+        
+        # Add epoch checkpoint callback if save_epochs is specified
+        if hasattr(self.args, 'save_epochs') and self.args.save_epochs is not None:
+            epoch_callback = EpochCheckpointCallback(save_epochs=self.args.save_epochs)
+            self.add_callback(epoch_callback)
+            logger.info(f"Added epoch checkpoint callback: saving every {self.args.save_epochs} epochs")
 
     def _save(self, output_dir: Optional[str] = None, state_dict=None):
         # If we are executing this function, we are the process zero, so we don't check for that.

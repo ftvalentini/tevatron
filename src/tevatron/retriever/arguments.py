@@ -218,3 +218,9 @@ class TevatronTrainingArguments(TrainingArguments):
         default=0.02,
         metadata={"help": "temperature for distillation"}
     )
+
+    # For epoch-based checkpointing
+    save_epochs: Optional[int] = field(
+        default=None,
+        metadata={"help": "Save checkpoint every N epochs. If None, uses save_steps instead."}
+    )
