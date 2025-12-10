@@ -96,7 +96,8 @@ def main():
         model=model,
         args=training_args,
         train_dataset=train_dataset,
-        data_collator=collator
+        data_collator=collator,
+        processing_class=tokenizer, # We need this there so that tokenizer is saved in every checkpoint
     )
     train_dataset.set_trainer(trainer)
     
