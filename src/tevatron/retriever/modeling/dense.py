@@ -17,7 +17,6 @@ class DenseModel(EncoderModel):
         # encode passage is the same as encode query
         return self.encode_query(psg)
         
-
     def _pooling(self, last_hidden_state, attention_mask):
         if self.pooling in ['cls', 'first']:
             reps = last_hidden_state[:, 0]

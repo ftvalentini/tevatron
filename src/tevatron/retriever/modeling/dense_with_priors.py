@@ -1,0 +1,332 @@
+import torch
+import torch.nn as nn
+import logging
+
+from tevatron.retriever.arguments import ModelArguments
+from transformers import AutoModel
+from peft import LoraConfig, TaskType, get_peft_model, PeftModel
+
+from .dense import DenseModel
+from .encoder import EncoderOutput
+
+
+logger = logging.getLogger(__name__)
+
+
+class PriorMLP(nn.Module):
+    """
+    MLP that maps document embeddings to prior values.
+    """
+    def __init__(self, input_dim: int, hidden_dim: int = 256, n_layers: int = 2, 
+                 use_tanh: bool = False, temperature: float = 1.0):
+        super().__init__()
+        layers = []
+        for i in range(n_layers - 1):
+            layers.append(nn.Linear(input_dim if i == 0 else hidden_dim, hidden_dim))
+            layers.append(nn.ReLU())
+        layers.append(nn.Linear(hidden_dim if n_layers > 1 else input_dim, 1))
+        self.network = nn.Sequential(*layers)
+        self.use_tanh = use_tanh
+        self.temperature = temperature
+    
+    def forward(self, embeddings):
+        """
+        Args:
+            embeddings: Document embeddings of shape (batch_size, embedding_dim)
+        
+        Returns:
+            Prior values of shape (batch_size,)
+        """
+        priors = self.network(embeddings).squeeze(-1)
+        if self.use_tanh:
+            priors = torch.tanh(priors)
+        priors = priors * self.temperature
+        return priors
+
+
+class DenseModelWithPriors(DenseModel):
+    """
+    Dense biencoder model with learned document-level priors.
+    
+    The model learns to predict document priors using an MLP that maps
+    document embeddings to scalar values. The final score for a (query, document)
+    pair is computed as:
+        score(q, d) = similarity(q, d) + prior(d)
+    
+    where similarity is the standard dot product and prior(d) is the learned
+    document prior.
+    """
+    
+    def __init__(
+        self,
+        encoder,
+        pooling: str = 'cls',
+        normalize: bool = False,
+        temperature: float = 1.0,
+        prior_hidden_dim: int = 256,
+        prior_n_layers: int = 2,
+        prior_use_tanh: bool = False,
+        prior_temperature: float = 1.0,
+        prior_reg_weight: float = 0.01,
+    ):
+        super().__init__(encoder, pooling, normalize, temperature)
+        
+        # Initialize the prior MLP
+        # Get embedding dimension from encoder config
+        embedding_dim = self.config.hidden_size
+        self.prior_mlp = PriorMLP(embedding_dim, prior_hidden_dim, prior_n_layers,
+                                   prior_use_tanh, prior_temperature)
+        
+        # Regularization weight for prior values
+        self.prior_reg_weight = prior_reg_weight
+        
+        logger.info(f"Initialized DenseModelWithPriors with prior_hidden_dim={prior_hidden_dim}, "
+                   f"prior_n_layers={prior_n_layers}, prior_use_tanh={prior_use_tanh}, "
+                   f"prior_temperature={prior_temperature}, prior_reg_weight={prior_reg_weight}")
+    
+    def compute_similarity(self, q_reps, p_reps, return_priors=False):
+        """
+        Compute similarity scores with document priors added.
+        
+        Args:
+            q_reps: Query representations of shape (num_queries, embedding_dim)
+            p_reps: Passage representations of shape (num_passages, embedding_dim)
+            return_priors: If True, return tuple (scores, priors)
+        
+        Returns:
+            If return_priors=False: Scores of shape (num_queries, num_passages) with priors added
+            If return_priors=True: Tuple of (scores, priors)
+        """
+        # Standard dot product similarity
+        scores = torch.matmul(q_reps, p_reps.transpose(0, 1))
+        # Compute document priors -- Shape: (num_passages,)
+        doc_priors = self.prior_mlp(p_reps)
+        # Add priors to scores
+        # Broadcasting: (num_queries, num_passages) + (num_passages,)
+        scores = scores + doc_priors.unsqueeze(0)
+        
+        if return_priors:
+            return scores, doc_priors
+        return scores
+    
+    def compute_loss(self, scores, target):
+        """
+        Compute loss with regularization on prior values.
+        
+        Args:
+            scores: Similarity scores of shape (batch_size, num_negatives + 1)
+            target: Target indices for contrastive loss
+        
+        Returns:
+            Total loss including cross-entropy and prior regularization
+        """
+        # Standard cross-entropy loss
+        ce_loss = self.cross_entropy(scores, target)
+        
+        # Regularization on priors to prevent them from getting too large
+        # NOTE In the forward pass, we compute priors on p_reps.
+        # Here we need to access the priors that were just computed
+        # --> we'll store them during forward pass
+        if hasattr(self, '_last_doc_priors') and self._last_doc_priors is not None:
+            # L2 regularization on prior values
+            prior_reg_loss = torch.mean(self._last_doc_priors ** 2)
+            total_loss = ce_loss + self.prior_reg_weight * prior_reg_loss
+            
+            # Log the components (only on process 0 if DDP)
+            if not self.is_ddp or self.process_rank == 0:
+                logger.debug(f"CE Loss: {ce_loss.item():.4f}, Prior Reg: {prior_reg_loss.item():.4f}, "
+                           f"Total Loss: {total_loss.item():.4f}")
+        else:
+            total_loss = ce_loss
+        
+        return total_loss
+    
+    def forward(self, query=None, passage=None):
+        """
+        Forward pass with prior computation and caching.
+        """
+        q_reps = self.encode_query(query) if query else None
+        p_reps = self.encode_passage(passage) if passage else None
+
+        # for inference
+        if q_reps is None or p_reps is None:
+            return EncoderOutput(q_reps=q_reps, p_reps=p_reps)
+
+        # for training
+        if self.training:
+            if self.is_ddp:
+                q_reps = self._dist_gather_tensor(q_reps)
+                p_reps = self._dist_gather_tensor(p_reps)
+
+            scores, doc_priors = self.compute_similarity(q_reps, p_reps, return_priors=True)
+            
+            # Store priors for regularization (no gradient needed for regularization)
+            # TODO check this!!!
+            with torch.no_grad():
+                self._last_doc_priors = doc_priors.detach()
+            
+            scores = scores.view(q_reps.size(0), -1)
+
+            target = torch.arange(scores.size(0), device=scores.device, dtype=torch.long)
+            target = target * (p_reps.size(0) // q_reps.size(0))
+
+            loss = self.compute_loss(scores / self.temperature, target)
+            if self.is_ddp:
+                loss = loss * self.world_size  # counter average weight reduction
+        # for eval
+        else:
+            scores = self.compute_similarity(q_reps, p_reps)
+            loss = None
+            
+        return EncoderOutput(
+            loss=loss,
+            scores=scores,
+            q_reps=q_reps,
+            p_reps=p_reps,
+        )
+    
+    def get_document_priors(self, p_reps):
+        """
+        Get document priors for given passage representations.
+        Useful for analysis and debugging.
+        
+        Args:
+            p_reps: Passage representations of shape (num_passages, embedding_dim)
+        
+        Returns:
+            Prior values of shape (num_passages,)
+        """
+        return self.prior_mlp(p_reps)
+    
+    def save(self, output_dir: str):
+        """
+        Save the model to a directory.
+        Saves encoder via save_pretrained and prior_mlp separately.
+        """
+        import os
+        # Save encoder using standard HuggingFace method
+        self.encoder.save_pretrained(output_dir)
+        # Save prior_mlp weights
+        prior_mlp_path = os.path.join(output_dir, 'prior_mlp.pt')
+        torch.save(self.prior_mlp.state_dict(), prior_mlp_path)
+        logger.info(f"Saved prior MLP to {prior_mlp_path}")
+    
+    @classmethod
+    def build(
+            cls,
+            model_args,
+            train_args,
+            **hf_kwargs,
+    ):
+        """
+        Build method that passes prior-specific arguments to the constructor.
+        """
+        base_model = AutoModel.from_pretrained(model_args.model_name_or_path, **hf_kwargs)
+        if base_model.config.pad_token_id is None:
+            base_model.config.pad_token_id = 0
+        
+        if model_args.lora or model_args.lora_name_or_path:
+            if train_args.gradient_checkpointing:
+                base_model.enable_input_require_grads()
+            if model_args.lora_name_or_path:
+                lora_config = LoraConfig.from_pretrained(model_args.lora_name_or_path, **hf_kwargs)
+                lora_model = PeftModel.from_pretrained(base_model, model_args.lora_name_or_path, is_trainable=True)
+            else:
+                lora_config = LoraConfig(
+                    base_model_name_or_path=model_args.model_name_or_path,
+                    task_type=TaskType.FEATURE_EXTRACTION,
+                    r=model_args.lora_r,
+                    lora_alpha=model_args.lora_alpha,
+                    lora_dropout=model_args.lora_dropout,
+                    target_modules=model_args.lora_target_modules.split(','),
+                    inference_mode=False
+                )
+                lora_model = get_peft_model(base_model, lora_config)
+            model = cls(
+                encoder=lora_model,
+                pooling=model_args.pooling,
+                normalize=model_args.normalize,
+                temperature=model_args.temperature,
+                prior_hidden_dim=model_args.prior_hidden_dim,
+                prior_n_layers=model_args.prior_n_layers,
+                prior_use_tanh=model_args.prior_use_tanh,
+                prior_temperature=model_args.prior_temperature,
+                prior_reg_weight=model_args.prior_reg_weight,
+            )
+        else:
+            model = cls(
+                encoder=base_model,
+                pooling=model_args.pooling,
+                normalize=model_args.normalize,
+                temperature=model_args.temperature,
+                prior_hidden_dim=model_args.prior_hidden_dim,
+                prior_n_layers=model_args.prior_n_layers,
+                prior_use_tanh=model_args.prior_use_tanh,
+                prior_temperature=model_args.prior_temperature,
+                prior_reg_weight=model_args.prior_reg_weight,
+            )
+        return model
+    
+    @classmethod
+    def load(
+            cls,
+            model_name_or_path: str,
+            pooling: str = 'cls',
+            normalize: bool = False,
+            lora_name_or_path: str = None,  # type: ignore
+            prior_hidden_dim: int = 256,
+            prior_n_layers: int = 2,
+            prior_use_tanh: bool = False,
+            prior_temperature: float = 1.0,
+            prior_reg_weight: float = 0.01,
+            **hf_kwargs
+    ):
+        """
+        Load a trained DenseModelWithPriors from a checkpoint.
+        """
+        import os
+        from transformers import AutoModel
+        from peft import LoraConfig, PeftModel
+        
+        base_model = AutoModel.from_pretrained(model_name_or_path, **hf_kwargs)
+        if base_model.config.pad_token_id is None:
+            base_model.config.pad_token_id = 0
+        
+        if lora_name_or_path:
+            lora_config = LoraConfig.from_pretrained(lora_name_or_path, **hf_kwargs)
+            lora_model = PeftModel.from_pretrained(base_model, lora_name_or_path, config=lora_config)
+            lora_model = lora_model.merge_and_unload()
+            model = cls(
+                encoder=lora_model,
+                pooling=pooling,
+                normalize=normalize,
+                prior_hidden_dim=prior_hidden_dim,
+                prior_n_layers=prior_n_layers,
+                prior_use_tanh=prior_use_tanh,
+                prior_temperature=prior_temperature,
+                prior_reg_weight=prior_reg_weight,
+            )
+        else:
+            model = cls(
+                encoder=base_model,
+                pooling=pooling,
+                normalize=normalize,
+                prior_hidden_dim=prior_hidden_dim,
+                prior_n_layers=prior_n_layers,
+                prior_use_tanh=prior_use_tanh,
+                prior_temperature=prior_temperature,
+                prior_reg_weight=prior_reg_weight,
+            )
+        
+        # Load prior_mlp weights if they exist
+        prior_mlp_path = os.path.join(model_name_or_path, 'prior_mlp.pt')
+        if os.path.exists(prior_mlp_path):
+            prior_mlp_state_dict = torch.load(prior_mlp_path, map_location='cpu')
+            model.prior_mlp.load_state_dict(prior_mlp_state_dict)
+            logger.info(f"Loaded prior MLP weights from {prior_mlp_path}")
+        else:
+            logger.warning(f"Prior MLP weights not found at {prior_mlp_path}. Using randomly initialized weights.")
+        
+        return model
+
+

@@ -78,6 +78,37 @@ class ModelArguments:
         },
     )
 
+    # For document-level priors
+    use_document_priors: bool = field(
+        default=False,
+        metadata={"help": "Whether to use document-level priors in the model"}
+    )
+
+    prior_hidden_dim: int = field(
+        default=256,
+        metadata={"help": "Hidden dimension for the prior MLP"}
+    )
+
+    prior_n_layers: int = field(
+        default=2,
+        metadata={"help": "Number of layers in the prior MLP"}
+    )
+
+    prior_use_tanh: bool = field(
+        default=False,
+        metadata={"help": "Apply tanh activation to constrain prior values to [-1, 1]"}
+    )
+
+    prior_temperature: float = field(
+        default=1.0,
+        metadata={"help": "Temperature scaling for prior values (applied after tanh if enabled)"}
+    )
+
+    prior_reg_weight: float = field(
+        default=0.01,
+        metadata={"help": "Regularization weight for document priors (L2 penalty)"}
+    )
+
 
 @dataclass
 class DataArguments:

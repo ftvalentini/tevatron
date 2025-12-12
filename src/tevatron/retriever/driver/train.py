@@ -13,7 +13,7 @@ from tevatron.retriever.arguments import ModelArguments, DataArguments, \
     TevatronTrainingArguments as TrainingArguments
 from tevatron.retriever.dataset import TrainDataset
 from tevatron.retriever.collator import TrainCollator
-from tevatron.retriever.modeling import DenseModel
+from tevatron.retriever.modeling import DenseModel, DenseModelWithPriors
 from tevatron.retriever.trainer import TevatronTrainer as Trainer
 from tevatron.retriever.gc_trainer import GradCacheTrainer as GCTrainer
 
@@ -80,7 +80,10 @@ def main():
     else:
         torch_dtype = torch.float32
     
-    model = DenseModel.build(
+    # Select model class based on whether to use document priors
+    model_cls = DenseModelWithPriors if model_args.use_document_priors else DenseModel
+    
+    model = model_cls.build(
         model_args,
         training_args,
         cache_dir=model_args.cache_dir,

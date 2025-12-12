@@ -55,22 +55,26 @@ class TevatronTrainer(Trainer):
         logger.info(f"Saving model checkpoint to {output_dir}")
 
         supported_classes = (EncoderModel,)
-        # Save a trained model and configuration using `save_pretrained()`.
-        # They can then be reloaded using `from_pretrained()`
+        # Save a trained model and configuration using `save_pretrained()` or custom save method
         if not isinstance(self.model, supported_classes):
             raise ValueError(f"Unsupported model class {self.model}")
         else:
-            if state_dict is None:
-                state_dict = self.model.state_dict()
-            prefix = 'encoder.'
-            assert all(k.startswith(prefix) for k in state_dict.keys()), list(state_dict.keys())
-            state_dict = {k[len(prefix):]: v for k, v in state_dict.items()}
-            self.model.encoder.save_pretrained(
-                output_dir, state_dict=state_dict, safe_serialization=self.args.save_safetensors
-            )
+            # Call model's save method if available, otherwise use standard approach
+            if hasattr(self.model, 'save') and callable(self.model.save):
+                # Use model's custom save method (handles encoder + any additional components)
+                self.model.save(output_dir)
+            else:
+                # Standard save for models without custom save method
+                if state_dict is None:
+                    state_dict = self.model.state_dict()
+                prefix = 'encoder.'
+                assert all(k.startswith(prefix) for k in state_dict.keys()), list(state_dict.keys())
+                state_dict = {k[len(prefix):]: v for k, v in state_dict.items()}
+                self.model.encoder.save_pretrained(
+                    output_dir, state_dict=state_dict, safe_serialization=self.args.save_safetensors
+                )
 
         # Use processing_class for compatibility with newer transformers versions
-        # tokenizer = getattr(self, 'processing_class', None) or getattr(self, 'tokenizer', None)
         tokenizer = self.processing_class
         if tokenizer is not None:
             tokenizer.save_pretrained(output_dir)
