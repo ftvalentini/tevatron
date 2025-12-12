@@ -84,7 +84,15 @@ class TevatronTrainer(Trainer):
 
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         query, passage = inputs
-        return model(query=query, passage=passage).loss
+        output = model(query=query, passage=passage)
+        
+        # Log tracking metrics if available (for DenseModelWithPriors)
+        # Handle both wrapped (DDP/DeepSpeed) and unwrapped models
+        unwrapped_model = self.accelerator.unwrap_model(model) if hasattr(self, 'accelerator') else model
+        if hasattr(unwrapped_model, '_tracking_metrics') and unwrapped_model._tracking_metrics:
+            self.log(unwrapped_model._tracking_metrics)
+        
+        return output.loss
 
     def training_step(self, *args):
         return super(TevatronTrainer, self).training_step(*args) / self._dist_loss_scale_factor

@@ -158,12 +158,20 @@ class DenseModelWithPriors(DenseModel):
                 q_reps = self._dist_gather_tensor(q_reps)
                 p_reps = self._dist_gather_tensor(p_reps)
 
-            scores, doc_priors = self.compute_similarity(q_reps, p_reps, return_priors=True)
+            # Compute semantic scores (without priors) and priors separately
+            semantic_scores = torch.matmul(q_reps, p_reps.transpose(0, 1))
+            doc_priors = self.prior_mlp(p_reps)
+            scores = semantic_scores + doc_priors.unsqueeze(0)
             
-            # Store priors for regularization (no gradient needed for regularization)
-            # TODO check this!!!
+            # Store priors for regularization and compute tracking metrics (no gradients needed)
             with torch.no_grad():
                 self._last_doc_priors = doc_priors.detach()
+                
+                batch_size = q_reps.size(0)
+                train_group_size = p_reps.size(0) // batch_size
+                self._tracking_metrics = self._compute_tracking_metrics(
+                    semantic_scores, doc_priors, batch_size, train_group_size
+                )
             
             scores = scores.view(q_reps.size(0), -1)
 
@@ -210,6 +218,43 @@ class DenseModelWithPriors(DenseModel):
         prior_mlp_path = os.path.join(output_dir, 'prior_mlp.pt')
         torch.save(self.prior_mlp.state_dict(), prior_mlp_path)
         logger.info(f"Saved prior MLP to {prior_mlp_path}")
+
+    def _compute_tracking_metrics(self, semantic_scores, doc_priors, batch_size, train_group_size):
+        """
+        Compute tracking metrics for monitoring during training.
+        
+        Args:
+            semantic_scores: Scores without priors, shape (batch_size, num_passages)
+            doc_priors: Document prior values, shape (num_passages,)
+            batch_size: Number of queries
+            train_group_size: Number of passages per query (1 pos + n negs)
+        
+        Returns:
+            Dictionary with tracking metrics
+        """
+        # Get indices of positive passages for each query
+        # Assuming positives are at positions [0, train_group_size, 2*train_group_size, ...]
+        positive_indices = torch.arange(batch_size, device=semantic_scores.device) * train_group_size
+        
+        # Average semantic score for positives
+        positive_semantic_scores = semantic_scores[torch.arange(batch_size, device=semantic_scores.device), positive_indices]
+        avg_semantic_score_pos = positive_semantic_scores.mean()
+        
+        # Average prior for positives
+        positive_priors = doc_priors[positive_indices]
+        avg_prior_pos = positive_priors.mean()
+        
+        # Average prior for negatives (all except positives)
+        negative_mask = torch.ones(doc_priors.size(0), dtype=torch.bool, device=semantic_scores.device)
+        negative_mask[positive_indices] = False
+        negative_priors = doc_priors[negative_mask]
+        avg_prior_neg = negative_priors.mean()
+        
+        return {
+            'avg_semantic_score_pos': avg_semantic_score_pos.item(),
+            'avg_prior_pos': avg_prior_pos.item(),
+            'avg_prior_neg': avg_prior_neg.item(),
+        }
     
     @classmethod
     def build(
