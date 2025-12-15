@@ -99,11 +99,6 @@ class ModelArguments:
         metadata={"help": "Apply tanh activation to constrain prior values to [-1, 1]"}
     )
 
-    prior_temperature: float = field(
-        default=1.0,
-        metadata={"help": "Temperature scaling for prior values (applied after tanh if enabled)"}
-    )
-
     prior_reg_weight: float = field(
         default=0.01,
         metadata={"help": "Regularization weight for document priors (L2 penalty)"}

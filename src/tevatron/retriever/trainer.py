@@ -41,6 +41,7 @@ class TevatronTrainer(Trainer):
         super(TevatronTrainer, self).__init__(*args, **kwargs)
         self.is_ddp = dist.is_initialized()
         self._dist_loss_scale_factor = dist.get_world_size() if self.is_ddp else 1
+        self._pending_tracking_metrics = None  # Store tracking metrics to merge with loss logs
         
         # Add epoch checkpoint callback if save_epochs is specified
         if hasattr(self.args, 'save_epochs') and self.args.save_epochs is not None:
@@ -86,13 +87,26 @@ class TevatronTrainer(Trainer):
         query, passage = inputs
         output = model(query=query, passage=passage)
         
-        # Log tracking metrics if available (for DenseModelWithPriors)
+        # Store tracking metrics to be merged with loss logs later
         # Handle both wrapped (DDP/DeepSpeed) and unwrapped models
         unwrapped_model = self.accelerator.unwrap_model(model) if hasattr(self, 'accelerator') else model
         if hasattr(unwrapped_model, '_tracking_metrics') and unwrapped_model._tracking_metrics:
-            self.log(unwrapped_model._tracking_metrics)
+            self._pending_tracking_metrics = unwrapped_model._tracking_metrics
         
         return output.loss
+    
+    def log(self, logs, *args, **kwargs) -> None:
+        """
+        Override log method to merge tracking metrics with loss/grad_norm logs.
+        This ensures all metrics appear on a single line.
+        """
+        # If we have pending tracking metrics and this log contains training metrics, merge them
+        if self._pending_tracking_metrics and ('loss' in logs or 'grad_norm' in logs):
+            logs.update(self._pending_tracking_metrics)
+            self._pending_tracking_metrics = None  # Clear after merging
+        
+        # Call parent's log method
+        super().log(logs, *args, **kwargs)
 
     def training_step(self, *args):
         return super(TevatronTrainer, self).training_step(*args) / self._dist_loss_scale_factor

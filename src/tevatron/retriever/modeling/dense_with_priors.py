@@ -116,7 +116,7 @@ class DenseModelWithPriors(DenseModel):
             # # Log the components (only on process 0 if DDP)
             # if not self.is_ddp or self.process_rank == 0:
             #     logger.debug(f"CE Loss: {ce_loss.item():.4f}, Prior Reg: {prior_reg_loss.item():.4f}, "
-            #                f"Total Loss: {total_loss.item():.4f}")
+            #                f"Reg Weight: {self.prior_reg_weight}, Total Loss: {total_loss.item():.4f}")
         else:
             total_loss = ce_loss
         
