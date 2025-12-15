@@ -43,6 +43,7 @@ class EncoderModel(nn.Module):
         if self.is_ddp:
             self.process_rank = dist.get_rank()
             self.world_size = dist.get_world_size()
+        self._tracking_metrics = None
 
     def forward(self, query: Dict[str, Tensor] = None, passage: Dict[str, Tensor] = None):
         q_reps = self.encode_query(query) if query else None
@@ -66,6 +67,14 @@ class EncoderModel(nn.Module):
 
             target = torch.arange(scores.size(0), device=scores.device, dtype=torch.long)
             target = target * (p_reps.size(0) // q_reps.size(0))
+
+            # Compute tracking metrics (no gradients needed)
+            with torch.no_grad():
+                batch_size = q_reps.size(0)
+                train_group_size = p_reps.size(0) // batch_size
+                self._tracking_metrics = self._compute_tracking_metrics(
+                    scores, batch_size, train_group_size
+                )
 
             loss = self.compute_loss(scores / self.temperature, target)
             if self.is_ddp:
@@ -92,6 +101,48 @@ class EncoderModel(nn.Module):
 
     def compute_loss(self, scores, target):
         return self.cross_entropy(scores, target)
+    
+    def _compute_tracking_metrics(self, scores, batch_size, train_group_size, additional_metrics=None):
+        """
+        Compute tracking metrics for monitoring during training.
+        
+        Args:
+            scores: Similarity scores, shape (batch_size, num_passages)
+            batch_size: Number of queries
+            train_group_size: Number of passages per query (1 pos + n negs)
+            additional_metrics: Optional dict of additional metrics to include
+        
+        Returns:
+            Dictionary with tracking metrics
+        """
+        # Get indices: [0, train_group_size, 2*train_group_size, ...]
+        positive_indices = torch.arange(batch_size, device=scores.device) * train_group_size
+        
+        # Extract positive scores
+        positive_scores = scores[torch.arange(batch_size, device=scores.device), positive_indices]
+        
+        # Calculate positive stats
+        sum_pos_scores = positive_scores.sum()
+        avg_semantic_score_pos = sum_pos_scores / batch_size
+        
+        # Total elements
+        numel_scores = scores.numel()
+        
+        # Calculate Negative Scores: (Total Sum - Positive Sum) / (Total Count - Positive Count)
+        sum_total_scores = scores.sum()
+        sum_neg_scores = sum_total_scores - sum_pos_scores
+        avg_semantic_score_neg = sum_neg_scores / (numel_scores - batch_size)
+        
+        metrics = {
+            'avg_semantic_score_pos': avg_semantic_score_pos.item(),
+            'avg_semantic_score_neg': avg_semantic_score_neg.item(),
+        }
+        
+        # Add any additional metrics provided by subclasses
+        if additional_metrics:
+            metrics.update(additional_metrics)
+        
+        return metrics
     
     def gradient_checkpointing_enable(self, **kwargs):
         self.encoder.gradient_checkpointing_enable()

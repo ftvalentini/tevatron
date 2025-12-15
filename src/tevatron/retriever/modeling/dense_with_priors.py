@@ -18,7 +18,7 @@ class PriorMLP(nn.Module):
     MLP that maps document embeddings to prior values.
     """
     def __init__(self, input_dim: int, hidden_dim: int = 256, n_layers: int = 2, 
-                 use_tanh: bool = False, temperature: float = 1.0):
+                 use_tanh: bool = False,):
         super().__init__()
         layers = []
         for i in range(n_layers - 1):
@@ -27,7 +27,6 @@ class PriorMLP(nn.Module):
         layers.append(nn.Linear(hidden_dim if n_layers > 1 else input_dim, 1))
         self.network = nn.Sequential(*layers)
         self.use_tanh = use_tanh
-        self.temperature = temperature
     
     def forward(self, embeddings):
         """
@@ -40,7 +39,6 @@ class PriorMLP(nn.Module):
         priors = self.network(embeddings).squeeze(-1)
         if self.use_tanh:
             priors = torch.tanh(priors)
-        priors = priors * self.temperature
         return priors
 
 
@@ -66,7 +64,6 @@ class DenseModelWithPriors(DenseModel):
         prior_hidden_dim: int = 256,
         prior_n_layers: int = 2,
         prior_use_tanh: bool = False,
-        prior_temperature: float = 1.0,
         prior_reg_weight: float = 0.01,
     ):
         super().__init__(encoder, pooling, normalize, temperature)
@@ -74,15 +71,10 @@ class DenseModelWithPriors(DenseModel):
         # Initialize the prior MLP
         # Get embedding dimension from encoder config
         embedding_dim = self.config.hidden_size
-        self.prior_mlp = PriorMLP(embedding_dim, prior_hidden_dim, prior_n_layers,
-                                   prior_use_tanh, prior_temperature)
+        self.prior_head = PriorMLP(embedding_dim, prior_hidden_dim, prior_n_layers, prior_use_tanh)
         
         # Regularization weight for prior values
         self.prior_reg_weight = prior_reg_weight
-        
-        logger.info(f"Initialized DenseModelWithPriors with prior_hidden_dim={prior_hidden_dim}, "
-                   f"prior_n_layers={prior_n_layers}, prior_use_tanh={prior_use_tanh}, "
-                   f"prior_temperature={prior_temperature}, prior_reg_weight={prior_reg_weight}")
     
     def compute_similarity(self, q_reps, p_reps, return_priors=False):
         """
@@ -100,7 +92,7 @@ class DenseModelWithPriors(DenseModel):
         # Standard dot product similarity
         scores = torch.matmul(q_reps, p_reps.transpose(0, 1))
         # Compute document priors -- Shape: (num_passages,)
-        doc_priors = self.prior_mlp(p_reps)
+        doc_priors = self.prior_head(p_reps)
         # Add priors to scores
         # Broadcasting: (num_queries, num_passages) + (num_passages,)
         scores = scores + doc_priors.unsqueeze(0)
@@ -112,30 +104,19 @@ class DenseModelWithPriors(DenseModel):
     def compute_loss(self, scores, target):
         """
         Compute loss with regularization on prior values.
-        
-        Args:
-            scores: Similarity scores of shape (batch_size, num_negatives + 1)
-            target: Target indices for contrastive loss
-        
-        Returns:
-            Total loss including cross-entropy and prior regularization
         """
         # Standard cross-entropy loss
         ce_loss = self.cross_entropy(scores, target)
         
-        # Regularization on priors to prevent them from getting too large
-        # NOTE In the forward pass, we compute priors on p_reps.
-        # Here we need to access the priors that were just computed
-        # --> we'll store them during forward pass
+        # L2 Regularization on priors to prevent them from getting too large
+        # NOTE In the forward pass, we compute priors on p_reps. Here we need to access the priors that were just computed
         if hasattr(self, '_last_doc_priors') and self._last_doc_priors is not None:
-            # L2 regularization on prior values
             prior_reg_loss = torch.mean(self._last_doc_priors ** 2)
             total_loss = ce_loss + self.prior_reg_weight * prior_reg_loss
-            
-            # Log the components (only on process 0 if DDP)
-            if not self.is_ddp or self.process_rank == 0:
-                logger.debug(f"CE Loss: {ce_loss.item():.4f}, Prior Reg: {prior_reg_loss.item():.4f}, "
-                           f"Total Loss: {total_loss.item():.4f}")
+            # # Log the components (only on process 0 if DDP)
+            # if not self.is_ddp or self.process_rank == 0:
+            #     logger.debug(f"CE Loss: {ce_loss.item():.4f}, Prior Reg: {prior_reg_loss.item():.4f}, "
+            #                f"Total Loss: {total_loss.item():.4f}")
         else:
             total_loss = ce_loss
         
@@ -160,7 +141,7 @@ class DenseModelWithPriors(DenseModel):
 
             # Compute semantic scores (without priors) and priors separately
             semantic_scores = torch.matmul(q_reps, p_reps.transpose(0, 1))
-            doc_priors = self.prior_mlp(p_reps)
+            doc_priors = self.prior_head(p_reps)
             scores = semantic_scores + doc_priors.unsqueeze(0)
             
             # Store priors for regularization and compute tracking metrics (no gradients needed)
@@ -181,6 +162,7 @@ class DenseModelWithPriors(DenseModel):
             loss = self.compute_loss(scores / self.temperature, target)
             if self.is_ddp:
                 loss = loss * self.world_size  # counter average weight reduction
+        
         # for eval
         else:
             scores = self.compute_similarity(q_reps, p_reps)
@@ -204,24 +186,25 @@ class DenseModelWithPriors(DenseModel):
         Returns:
             Prior values of shape (num_passages,)
         """
-        return self.prior_mlp(p_reps)
+        return self.prior_head(p_reps)
     
     def save(self, output_dir: str):
         """
         Save the model to a directory.
-        Saves encoder via save_pretrained and prior_mlp separately.
+        Saves encoder via save_pretrained and prior_head separately.
         """
         import os
         # Save encoder using standard HuggingFace method
         self.encoder.save_pretrained(output_dir)
-        # Save prior_mlp weights
-        prior_mlp_path = os.path.join(output_dir, 'prior_mlp.pt')
-        torch.save(self.prior_mlp.state_dict(), prior_mlp_path)
-        logger.info(f"Saved prior MLP to {prior_mlp_path}")
+        # Save prior_head weights
+        prior_head_path = os.path.join(output_dir, 'prior_head.pt')
+        torch.save(self.prior_head.state_dict(), prior_head_path)
+        logger.info(f"Saved prior head to {prior_head_path}")
 
     def _compute_tracking_metrics(self, semantic_scores, doc_priors, batch_size, train_group_size):
         """
         Compute tracking metrics for monitoring during training.
+        Extends base class method to include prior-specific metrics.
         
         Args:
             semantic_scores: Scores without priors, shape (batch_size, num_passages)
@@ -230,31 +213,33 @@ class DenseModelWithPriors(DenseModel):
             train_group_size: Number of passages per query (1 pos + n negs)
         
         Returns:
-            Dictionary with tracking metrics
+            Dictionary with tracking metrics (semantic scores + priors)
         """
-        # Get indices of positive passages for each query
-        # Assuming positives are at positions [0, train_group_size, 2*train_group_size, ...]
+        # Get indices: [0, train_group_size, 2*train_group_size, ...]
         positive_indices = torch.arange(batch_size, device=semantic_scores.device) * train_group_size
         
-        # Average semantic score for positives
-        positive_semantic_scores = semantic_scores[torch.arange(batch_size, device=semantic_scores.device), positive_indices]
-        avg_semantic_score_pos = positive_semantic_scores.mean()
-        
-        # Average prior for positives
+        # Extract positive priors
         positive_priors = doc_priors[positive_indices]
-        avg_prior_pos = positive_priors.mean()
+        sum_pos_priors = positive_priors.sum()
+        avg_prior_pos = sum_pos_priors / batch_size
+
+        # Total elements
+        numel_priors = doc_priors.numel()
         
-        # Average prior for negatives (all except positives)
-        negative_mask = torch.ones(doc_priors.size(0), dtype=torch.bool, device=semantic_scores.device)
-        negative_mask[positive_indices] = False
-        negative_priors = doc_priors[negative_mask]
-        avg_prior_neg = negative_priors.mean()
-        
-        return {
-            'avg_semantic_score_pos': avg_semantic_score_pos.item(),
+        # Calculate Negative Priors
+        sum_total_priors = doc_priors.sum()
+        sum_neg_priors = sum_total_priors - sum_pos_priors
+        avg_prior_neg = sum_neg_priors / (numel_priors - batch_size)
+
+        # Compute base metrics (semantic scores) and add prior metrics
+        prior_metrics = {
             'avg_prior_pos': avg_prior_pos.item(),
             'avg_prior_neg': avg_prior_neg.item(),
         }
+        
+        return super()._compute_tracking_metrics(
+            semantic_scores, batch_size, train_group_size, additional_metrics=prior_metrics
+        )
     
     @classmethod
     def build(
@@ -295,7 +280,6 @@ class DenseModelWithPriors(DenseModel):
                 prior_hidden_dim=model_args.prior_hidden_dim,
                 prior_n_layers=model_args.prior_n_layers,
                 prior_use_tanh=model_args.prior_use_tanh,
-                prior_temperature=model_args.prior_temperature,
                 prior_reg_weight=model_args.prior_reg_weight,
             )
         else:
@@ -307,7 +291,6 @@ class DenseModelWithPriors(DenseModel):
                 prior_hidden_dim=model_args.prior_hidden_dim,
                 prior_n_layers=model_args.prior_n_layers,
                 prior_use_tanh=model_args.prior_use_tanh,
-                prior_temperature=model_args.prior_temperature,
                 prior_reg_weight=model_args.prior_reg_weight,
             )
         return model
@@ -322,7 +305,6 @@ class DenseModelWithPriors(DenseModel):
             prior_hidden_dim: int = 256,
             prior_n_layers: int = 2,
             prior_use_tanh: bool = False,
-            prior_temperature: float = 1.0,
             prior_reg_weight: float = 0.01,
             **hf_kwargs
     ):
@@ -348,7 +330,6 @@ class DenseModelWithPriors(DenseModel):
                 prior_hidden_dim=prior_hidden_dim,
                 prior_n_layers=prior_n_layers,
                 prior_use_tanh=prior_use_tanh,
-                prior_temperature=prior_temperature,
                 prior_reg_weight=prior_reg_weight,
             )
         else:
@@ -359,18 +340,17 @@ class DenseModelWithPriors(DenseModel):
                 prior_hidden_dim=prior_hidden_dim,
                 prior_n_layers=prior_n_layers,
                 prior_use_tanh=prior_use_tanh,
-                prior_temperature=prior_temperature,
                 prior_reg_weight=prior_reg_weight,
             )
         
-        # Load prior_mlp weights if they exist
-        prior_mlp_path = os.path.join(model_name_or_path, 'prior_mlp.pt')
-        if os.path.exists(prior_mlp_path):
-            prior_mlp_state_dict = torch.load(prior_mlp_path, map_location='cpu')
-            model.prior_mlp.load_state_dict(prior_mlp_state_dict)
-            logger.info(f"Loaded prior MLP weights from {prior_mlp_path}")
+        # Load prior_head weights if they exist
+        prior_head_path = os.path.join(model_name_or_path, 'prior_head.pt')
+        if os.path.exists(prior_head_path):
+            prior_head_state_dict = torch.load(prior_head_path, map_location='cpu')
+            model.prior_head.load_state_dict(prior_head_state_dict)
+            logger.info(f"Loaded prior head weights from {prior_head_path}")
         else:
-            logger.warning(f"Prior MLP weights not found at {prior_mlp_path}. Using randomly initialized weights.")
+            logger.warning(f"Prior head weights not found at {prior_head_path}. Using randomly initialized weights.")
         
         return model
 
