@@ -68,13 +68,13 @@ class EncoderModel(nn.Module):
             target = torch.arange(scores.size(0), device=scores.device, dtype=torch.long)
             target = target * (p_reps.size(0) // q_reps.size(0))
 
-            # Compute tracking metrics (no gradients needed)
-            with torch.no_grad():
-                batch_size = q_reps.size(0)
-                train_group_size = p_reps.size(0) // batch_size
-                self._tracking_metrics = self._compute_tracking_metrics(
-                    scores, batch_size, train_group_size
-                )
+            # # Compute tracking metrics (no gradients needed)
+            # with torch.no_grad():
+            #     batch_size = q_reps.size(0)
+            #     train_group_size = p_reps.size(0) // batch_size
+            #     self._tracking_metrics = self._compute_tracking_metrics(
+            #         scores, batch_size, train_group_size
+            #     )
 
             loss = self.compute_loss(scores / self.temperature, target)
             if self.is_ddp:

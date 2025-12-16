@@ -39,6 +39,7 @@ class PriorMLP(nn.Module):
         priors = self.network(embeddings).squeeze(-1)
         if self.use_tanh:
             priors = torch.tanh(priors)
+            # changed_indices = (priors_ != priors).nonzero(as_tuple=True)[0]
         return priors
 
 
@@ -69,56 +70,37 @@ class DenseModelWithPriors(DenseModel):
         super().__init__(encoder, pooling, normalize, temperature)
         
         # Initialize the prior MLP
-        # Get embedding dimension from encoder config
         embedding_dim = self.config.hidden_size
         self.prior_head = PriorMLP(embedding_dim, prior_hidden_dim, prior_n_layers, prior_use_tanh)
         
         # Regularization weight for prior values
         self.prior_reg_weight = prior_reg_weight
     
-    def compute_similarity(self, q_reps, p_reps, return_priors=False):
-        """
-        Compute similarity scores with document priors added.
-        
-        Args:
-            q_reps: Query representations of shape (num_queries, embedding_dim)
-            p_reps: Passage representations of shape (num_passages, embedding_dim)
-            return_priors: If True, return tuple (scores, priors)
-        
-        Returns:
-            If return_priors=False: Scores of shape (num_queries, num_passages) with priors added
-            If return_priors=True: Tuple of (scores, priors)
-        """
-        # Standard dot product similarity
-        scores = torch.matmul(q_reps, p_reps.transpose(0, 1))
-        # Compute document priors -- Shape: (num_passages,)
-        doc_priors = self.prior_head(p_reps)
-        # Add priors to scores
-        # Broadcasting: (num_queries, num_passages) + (num_passages,)
-        scores = scores + doc_priors.unsqueeze(0)
-        
-        if return_priors:
-            return scores, doc_priors
-        return scores
+    def compute_similarity(self, q_reps, p_reps):
+        return torch.matmul(q_reps, p_reps.transpose(0, 1))
     
-    def compute_loss(self, scores, target):
+    def compute_loss(self, scores, target, doc_priors):
         """
         Compute loss with regularization on prior values.
         """
-        # Standard cross-entropy loss
         ce_loss = self.cross_entropy(scores, target)
+        prior_reg_loss = torch.mean(doc_priors ** 2)
+        total_loss = ce_loss + self.prior_reg_weight * prior_reg_loss
         
-        # L2 Regularization on priors to prevent them from getting too large
-        # NOTE In the forward pass, we compute priors on p_reps. Here we need to access the priors that were just computed
-        if hasattr(self, '_last_doc_priors') and self._last_doc_priors is not None:
-            prior_reg_loss = torch.mean(self._last_doc_priors ** 2)
-            total_loss = ce_loss + self.prior_reg_weight * prior_reg_loss
-            # # Log the components (only on process 0 if DDP)
-            # if not self.is_ddp or self.process_rank == 0:
-            #     logger.debug(f"CE Loss: {ce_loss.item():.4f}, Prior Reg: {prior_reg_loss.item():.4f}, "
-            #                f"Reg Weight: {self.prior_reg_weight}, Total Loss: {total_loss.item():.4f}")
-        else:
-            total_loss = ce_loss
+        # # L2 Regularization on priors to prevent them from getting too large
+        # # NOTE In the forward pass, we compute priors on p_reps. Here we need to access the priors that were just computed
+        # if hasattr(self, '_last_doc_priors') and self._last_doc_priors is not None:
+        #     prior_reg_loss = torch.mean(self._last_doc_priors ** 2)
+        #     total_loss = ce_loss + self.prior_reg_weight * prior_reg_loss
+        #     # print(f"[DEBUG] CE Loss: {ce_loss.item():.4f}, Total Loss: {total_loss.item():.4f}")
+        #     # print(f"[DEBUG] CE Loss: {ce_loss.item():.4f}, Prior Reg: {prior_reg_loss.item():.4f}, "
+        #         #   f"Reg Weight: {self.prior_reg_weight}, Total Loss: {total_loss.item():.4f}")
+        #     # # Log the components (only on process 0 if DDP)
+        #     # if not self.is_ddp or self.process_rank == 0:
+        #     #     logger.debug(f"CE Loss: {ce_loss.item():.4f}, Prior Reg: {prior_reg_loss.item():.4f}, "
+        #     #                f"Reg Weight: {self.prior_reg_weight}, Total Loss: {total_loss.item():.4f}")
+        # else:
+        #     total_loss = ce_loss
         
         return total_loss
     
@@ -139,31 +121,29 @@ class DenseModelWithPriors(DenseModel):
                 q_reps = self._dist_gather_tensor(q_reps)
                 p_reps = self._dist_gather_tensor(p_reps)
 
-            # Compute semantic scores (without priors) and priors separately
-            semantic_scores = torch.matmul(q_reps, p_reps.transpose(0, 1))
+            semantic_scores = self.compute_similarity(q_reps, p_reps)
             doc_priors = self.prior_head(p_reps)
             scores = semantic_scores + doc_priors.unsqueeze(0)
             
-            # Store priors for regularization and compute tracking metrics (no gradients needed)
-            with torch.no_grad():
-                self._last_doc_priors = doc_priors.detach()
+            # # Compute any tracking metrics before loss
+            # with torch.no_grad():
+            #     self._last_doc_priors = doc_priors.detach()
                 
-                batch_size = q_reps.size(0)
-                train_group_size = p_reps.size(0) // batch_size
-                self._tracking_metrics = self._compute_tracking_metrics(
-                    semantic_scores, doc_priors, batch_size, train_group_size
-                )
+            #     batch_size = q_reps.size(0)
+            #     train_group_size = p_reps.size(0) // batch_size
+            #     self._tracking_metrics = self._compute_tracking_metrics(
+            #         semantic_scores, doc_priors, batch_size, train_group_size
+            #     )
             
+            # Compute loss
             scores = scores.view(q_reps.size(0), -1)
-
             target = torch.arange(scores.size(0), device=scores.device, dtype=torch.long)
             target = target * (p_reps.size(0) // q_reps.size(0))
-
-            loss = self.compute_loss(scores / self.temperature, target)
+            loss = self.compute_loss(scores / self.temperature, target, doc_priors)
             if self.is_ddp:
                 loss = loss * self.world_size  # counter average weight reduction
         
-        # for eval
+        # for eval TODO not used yet
         else:
             scores = self.compute_similarity(q_reps, p_reps)
             loss = None
