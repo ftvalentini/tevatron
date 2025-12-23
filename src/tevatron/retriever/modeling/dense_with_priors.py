@@ -84,6 +84,8 @@ class DenseModelWithPriors(DenseModel):
         Compute loss with regularization on prior values.
         """
         ce_loss = self.cross_entropy(scores, target)
+        if self.prior_reg_weight == 0.0:
+            return ce_loss
         prior_reg_loss = torch.mean(doc_priors ** 2)
         total_loss = ce_loss + self.prior_reg_weight * prior_reg_loss
         
@@ -125,15 +127,15 @@ class DenseModelWithPriors(DenseModel):
             doc_priors = self.prior_head(p_reps)
             scores = semantic_scores + doc_priors.unsqueeze(0)
             
-            # # Compute any tracking metrics before loss
-            # with torch.no_grad():
-            #     self._last_doc_priors = doc_priors.detach()
+            # Compute any tracking metrics before loss
+            with torch.no_grad():
+                # self._last_doc_priors = doc_priors.detach()
                 
-            #     batch_size = q_reps.size(0)
-            #     train_group_size = p_reps.size(0) // batch_size
-            #     self._tracking_metrics = self._compute_tracking_metrics(
-            #         semantic_scores, doc_priors, batch_size, train_group_size
-            #     )
+                batch_size = q_reps.size(0)
+                train_group_size = p_reps.size(0) // batch_size
+                self._tracking_metrics = self._compute_tracking_metrics(
+                    semantic_scores, doc_priors, batch_size, train_group_size
+                )
             
             # Compute loss
             scores = scores.view(q_reps.size(0), -1)
@@ -202,13 +204,11 @@ class DenseModelWithPriors(DenseModel):
         positive_priors = doc_priors[positive_indices]
         sum_pos_priors = positive_priors.sum()
         avg_prior_pos = sum_pos_priors / batch_size
-
-        # Total elements
-        numel_priors = doc_priors.numel()
         
         # Calculate Negative Priors
-        sum_total_priors = doc_priors.sum()
-        sum_neg_priors = sum_total_priors - sum_pos_priors
+        sum_priors = doc_priors.sum()
+        sum_neg_priors = sum_priors - sum_pos_priors
+        numel_priors = doc_priors.numel()
         avg_prior_neg = sum_neg_priors / (numel_priors - batch_size)
 
         # Compute base metrics (semantic scores) and add prior metrics

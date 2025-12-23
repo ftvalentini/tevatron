@@ -68,13 +68,13 @@ class EncoderModel(nn.Module):
             target = torch.arange(scores.size(0), device=scores.device, dtype=torch.long)
             target = target * (p_reps.size(0) // q_reps.size(0))
 
-            # # Compute tracking metrics (no gradients needed)
-            # with torch.no_grad():
-            #     batch_size = q_reps.size(0)
-            #     train_group_size = p_reps.size(0) // batch_size
-            #     self._tracking_metrics = self._compute_tracking_metrics(
-            #         scores, batch_size, train_group_size
-            #     )
+            # Compute any tracking metrics before loss
+            with torch.no_grad():
+                batch_size = q_reps.size(0)
+                train_group_size = p_reps.size(0) // batch_size
+                self._tracking_metrics = self._compute_tracking_metrics(
+                    scores, batch_size, train_group_size
+                )
 
             loss = self.compute_loss(scores / self.temperature, target)
             if self.is_ddp:
@@ -117,20 +117,16 @@ class EncoderModel(nn.Module):
         """
         # Get indices: [0, train_group_size, 2*train_group_size, ...]
         positive_indices = torch.arange(batch_size, device=scores.device) * train_group_size
-        
-        # Extract positive scores
         positive_scores = scores[torch.arange(batch_size, device=scores.device), positive_indices]
         
-        # Calculate positive stats
+        # Positive stats
         sum_pos_scores = positive_scores.sum()
         avg_semantic_score_pos = sum_pos_scores / batch_size
         
-        # Total elements
-        numel_scores = scores.numel()
-        
         # Calculate Negative Scores: (Total Sum - Positive Sum) / (Total Count - Positive Count)
-        sum_total_scores = scores.sum()
-        sum_neg_scores = sum_total_scores - sum_pos_scores
+        sum_scores = scores.sum()
+        numel_scores = scores.numel()
+        sum_neg_scores = sum_scores - sum_pos_scores
         avg_semantic_score_neg = sum_neg_scores / (numel_scores - batch_size)
         
         metrics = {
