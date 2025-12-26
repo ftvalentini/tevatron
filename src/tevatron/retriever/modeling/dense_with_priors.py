@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import logging
+from typing import Optional, Dict, Union
 
 from tevatron.retriever.arguments import ModelArguments
 from transformers import AutoModel
@@ -25,8 +26,9 @@ class PriorMLP(nn.Module):
             layers.append(nn.Linear(input_dim if i == 0 else hidden_dim, hidden_dim))
             layers.append(nn.ReLU())
         layers.append(nn.Linear(hidden_dim if n_layers > 1 else input_dim, 1))
+        if use_tanh:
+            layers.append(nn.Tanh())
         self.network = nn.Sequential(*layers)
-        self.use_tanh = use_tanh
     
     def forward(self, embeddings):
         """
@@ -37,9 +39,7 @@ class PriorMLP(nn.Module):
             Prior values of shape (batch_size,)
         """
         priors = self.network(embeddings).squeeze(-1)
-        if self.use_tanh:
-            priors = torch.tanh(priors)
-            # changed_indices = (priors_ != priors).nonzero(as_tuple=True)[0]
+        # changed_indices = (priors_ != priors).nonzero(as_tuple=True)[0]
         return priors
 
 
@@ -229,7 +229,7 @@ class DenseModelWithPriors(DenseModel):
             **hf_kwargs,
     ):
         """
-        Build method that passes prior-specific arguments to the constructor.
+        Build method (used for training initialization).
         """
         base_model = AutoModel.from_pretrained(model_args.model_name_or_path, **hf_kwargs)
         if base_model.config.pad_token_id is None:
@@ -281,7 +281,7 @@ class DenseModelWithPriors(DenseModel):
             model_name_or_path: str,
             pooling: str = 'cls',
             normalize: bool = False,
-            lora_name_or_path: str = None,  # type: ignore
+            lora_name_or_path: Optional[str] = None,
             prior_hidden_dim: int = 256,
             prior_n_layers: int = 2,
             prior_use_tanh: bool = False,
@@ -289,7 +289,7 @@ class DenseModelWithPriors(DenseModel):
             **hf_kwargs
     ):
         """
-        Load a trained DenseModelWithPriors from a checkpoint.
+        Load a trained DenseModelWithPriors from a checkpoint (used for inference).
         """
         import os
         from transformers import AutoModel
