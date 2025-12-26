@@ -1,11 +1,15 @@
 import logging
 import os
 import sys
+import json
+from dataclasses import asdict
+
 import torch
 from transformers import AutoTokenizer
 from transformers import (
     HfArgumentParser,
     set_seed,
+    TrainerCallback,
 )
 from transformers.trainer_utils import get_last_checkpoint
 
@@ -104,6 +108,9 @@ def main():
     )
     train_dataset.set_trainer(trainer)
     
+    # Log all arguments to wandb
+    trainer.add_callback(ConfigCallback(model_args, data_args))
+
     last_checkpoint = None
     if os.path.isdir(training_args.output_dir):
         last_checkpoint = get_last_checkpoint(training_args.output_dir)
@@ -114,10 +121,41 @@ def main():
         tokenizer.save_pretrained(training_args.output_dir)
         
         # Save all arguments (useful for inference e.g. passage_max_len, pooling, etc.)
-        model_args.to_json_file(os.path.join(training_args.output_dir, "model_args.json"))
-        data_args.to_json_file(os.path.join(training_args.output_dir, "data_args.json"))
-        training_args.to_json_file(os.path.join(training_args.output_dir, "training_args.json"))
+        save_configs(training_args.output_dir, model_args, data_args, training_args)
 
+
+class ConfigCallback(TrainerCallback):
+    """A callback that logs the model and data arguments to wandb at the start of training.
+    """
+    def __init__(self, model_args, data_args):
+        self.model_args = model_args
+        self.data_args = data_args
+
+    def on_train_begin(self, args, state, control, **kwargs):
+        """
+        This runs at the beginning of training, after wandb is initialized.
+        """
+        # We only import wandb inside the method to avoid top-level dependency
+        try:
+            import wandb
+            if wandb.run is not None:
+                # Nest custom dataclasses under their own keys in wandb config
+                wandb.config.update({
+                    "model_args": asdict(self.model_args),
+                    "data_args": asdict(self.data_args)
+                }, allow_val_change=True)
+        except ImportError:
+            pass
+
+
+def save_configs(output_dir, model_args, data_args, training_args):
+    """Save the dataclass arguments to JSON files in the output directory."""
+    with open(os.path.join(output_dir, "model_args.json"), 'w') as f:
+        json.dump(asdict(model_args), f, indent=4)
+    with open(os.path.join(output_dir, "data_args.json"), 'w') as f:
+        json.dump(asdict(data_args), f, indent=4)
+    with open(os.path.join(output_dir, "training_args.json"), 'w') as f:
+        json.dump(asdict(training_args), f, indent=4)
 
 if __name__ == "__main__":
     main()

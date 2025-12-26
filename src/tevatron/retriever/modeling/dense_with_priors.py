@@ -62,7 +62,7 @@ class DenseModelWithPriors(DenseModel):
         pooling: str = 'cls',
         normalize: bool = False,
         temperature: float = 1.0,
-        prior_hidden_dim: int = 256,
+        prior_hidden_dim: int = 32,
         prior_n_layers: int = 2,
         prior_use_tanh: bool = False,
         prior_reg_weight: float = 0.01,
