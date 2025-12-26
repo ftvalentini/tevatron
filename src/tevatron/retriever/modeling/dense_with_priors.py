@@ -3,7 +3,7 @@ import torch.nn as nn
 import logging
 from typing import Optional, Dict, Union
 
-from tevatron.retriever.arguments import ModelArguments
+from tevatron.retriever.arguments import ModelArguments, TevatronTrainingArguments as TrainingArguments
 from transformers import AutoModel
 from peft import LoraConfig, TaskType, get_peft_model, PeftModel
 
@@ -224,12 +224,12 @@ class DenseModelWithPriors(DenseModel):
     @classmethod
     def build(
             cls,
-            model_args,
-            train_args,
+            model_args: ModelArguments,
+            train_args: TrainingArguments,
             **hf_kwargs,
     ):
         """
-        Build method (used for training initialization).
+        Build method (used for training)
         """
         base_model = AutoModel.from_pretrained(model_args.model_name_or_path, **hf_kwargs)
         if base_model.config.pad_token_id is None:
@@ -282,18 +282,33 @@ class DenseModelWithPriors(DenseModel):
             pooling: str = 'cls',
             normalize: bool = False,
             lora_name_or_path: Optional[str] = None,
-            prior_hidden_dim: int = 256,
-            prior_n_layers: int = 2,
-            prior_use_tanh: bool = False,
-            prior_reg_weight: float = 0.01,
             **hf_kwargs
     ):
         """
-        Load a trained DenseModelWithPriors from a checkpoint (used for inference).
+        Load a trained DenseModelWithPriors from a checkpoint.
         """
         import os
+        import json
         from transformers import AutoModel
         from peft import LoraConfig, PeftModel
+        
+        base_model_path = model_name_or_path if not lora_name_or_path else lora_name_or_path
+        
+        # # Load saved configuration if available
+        # config_path = os.path.join(base_model_path, 'encoder_config.json')
+        # model_kwargs = {}
+        # if os.path.exists(config_path):
+        #     with open(config_path, 'r') as f:
+        #         model_kwargs = json.load(f)
+        #     logger.info(f"Loaded prior model config from {config_path}")
+        # else:
+        #     logger.warning(f"Config file not found at {config_path}. Using default values from __init__.")
+        
+        # # Override with explicitly provided parameters
+        # if pooling is not None:
+        #     model_kwargs['pooling'] = pooling
+        # if normalize is not None:
+        #     model_kwargs['normalize'] = normalize
         
         base_model = AutoModel.from_pretrained(model_name_or_path, **hf_kwargs)
         if base_model.config.pad_token_id is None:
@@ -307,24 +322,16 @@ class DenseModelWithPriors(DenseModel):
                 encoder=lora_model,
                 pooling=pooling,
                 normalize=normalize,
-                prior_hidden_dim=prior_hidden_dim,
-                prior_n_layers=prior_n_layers,
-                prior_use_tanh=prior_use_tanh,
-                prior_reg_weight=prior_reg_weight,
             )
         else:
             model = cls(
                 encoder=base_model,
                 pooling=pooling,
                 normalize=normalize,
-                prior_hidden_dim=prior_hidden_dim,
-                prior_n_layers=prior_n_layers,
-                prior_use_tanh=prior_use_tanh,
-                prior_reg_weight=prior_reg_weight,
             )
         
         # Load prior_head weights if they exist
-        prior_head_path = os.path.join(model_name_or_path, 'prior_head.pt')
+        prior_head_path = os.path.join(base_model_path, 'prior_head.pt')
         if os.path.exists(prior_head_path):
             prior_head_state_dict = torch.load(prior_head_path, map_location='cpu')
             model.prior_head.load_state_dict(prior_head_state_dict)

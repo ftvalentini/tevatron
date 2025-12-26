@@ -112,6 +112,11 @@ def main():
     trainer.save_model()
     if trainer.is_world_process_zero():
         tokenizer.save_pretrained(training_args.output_dir)
+        
+        # Save all arguments (useful for inference e.g. passage_max_len, pooling, etc.)
+        model_args.to_json_file(os.path.join(training_args.output_dir, "model_args.json"))
+        data_args.to_json_file(os.path.join(training_args.output_dir, "data_args.json"))
+        training_args.to_json_file(os.path.join(training_args.output_dir, "training_args.json"))
 
 
 if __name__ == "__main__":
