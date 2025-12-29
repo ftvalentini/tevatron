@@ -157,7 +157,7 @@ class DenseModelWithPriors(DenseModel):
             p_reps=p_reps,
         )
     
-    def get_document_priors(self, p_reps):
+    def get_document_priors(self, p_reps: torch.Tensor) -> torch.Tensor:
         """
         Get document priors for given passage representations.
         Useful for analysis and debugging.

@@ -1,5 +1,7 @@
 import os
 from typing import Optional
+import json
+from dataclasses import asdict
 
 import torch
 
@@ -37,11 +39,13 @@ class EpochCheckpointCallback(TrainerCallback):
 
 
 class TevatronTrainer(Trainer):
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, model_args=None, data_args=None, **kwargs):
         super(TevatronTrainer, self).__init__(*args, **kwargs)
         self.is_ddp = dist.is_initialized()
         self._dist_loss_scale_factor = dist.get_world_size() if self.is_ddp else 1
         self._pending_tracking_metrics = None  # Store tracking metrics to merge with loss logs
+        self.model_args = model_args  # Store model args for saving in checkpoints
+        self.data_args = data_args  # Store data args for saving in checkpoints
         
         # Add epoch checkpoint callback if save_epochs is specified
         if hasattr(self.args, 'save_epochs') and self.args.save_epochs is not None:
@@ -82,6 +86,17 @@ class TevatronTrainer(Trainer):
 
         # Good practice: save your training arguments together with the trained model
         torch.save(self.args, os.path.join(output_dir, TRAINING_ARGS_NAME))
+        
+        # Save config arguments if available
+        if self.model_args is not None:
+            with open(os.path.join(output_dir, "model_args.json"), 'w') as f:
+                json.dump(asdict(self.model_args), f, indent=4)
+        if self.data_args is not None:
+            with open(os.path.join(output_dir, "data_args.json"), 'w') as f:
+                json.dump(asdict(self.data_args), f, indent=4)
+        if self.args is not None:
+            with open(os.path.join(output_dir, "training_args.json"), 'w') as f:
+                json.dump(asdict(self.args), f, indent=4)
 
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         query, passage = inputs

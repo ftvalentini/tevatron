@@ -105,6 +105,8 @@ def main():
         train_dataset=train_dataset,
         data_collator=collator,
         processing_class=tokenizer, # We need this there so that tokenizer is saved in every checkpoint
+        model_args=model_args,  # Pass model args for saving in checkpoints
+        data_args=data_args,  # Pass data args for saving in checkpoints
     )
     train_dataset.set_trainer(trainer)
     
@@ -156,6 +158,7 @@ def save_configs(output_dir, model_args, data_args, training_args):
         json.dump(asdict(data_args), f, indent=4)
     with open(os.path.join(output_dir, "training_args.json"), 'w') as f:
         json.dump(asdict(training_args), f, indent=4)
+
 
 if __name__ == "__main__":
     main()

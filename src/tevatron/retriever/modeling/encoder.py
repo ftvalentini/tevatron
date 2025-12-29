@@ -203,7 +203,7 @@ class EncoderModel(nn.Module):
              model_name_or_path: str,
              pooling: str = 'cls',
              normalize: bool = False,
-             lora_name_or_path: str = None,
+             lora_name_or_path: Optional[str] = None,
              **hf_kwargs):
         base_model = cls.TRANSFORMER_CLS.from_pretrained(model_name_or_path, **hf_kwargs)
         if base_model.config.pad_token_id is None:
