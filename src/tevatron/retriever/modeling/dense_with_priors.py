@@ -288,13 +288,13 @@ class DenseModelWithPriors(DenseModel):
         Load a trained DenseModelWithPriors from a checkpoint.
         """
         import os
-        import json
         from transformers import AutoModel
         from peft import LoraConfig, PeftModel
         
         base_model_path = model_name_or_path if not lora_name_or_path else lora_name_or_path
         
         # # Load saved configuration if available
+        # import json
         # config_path = os.path.join(base_model_path, 'encoder_config.json')
         # model_kwargs = {}
         # if os.path.exists(config_path):
